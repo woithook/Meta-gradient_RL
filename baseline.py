@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 ITERATION = 500
 SAMPLE_NUMS = 100
 LR = 0.01
+CLIP_GRAD_NORM = 0.5
 
 
 def run(random_seed):
@@ -117,8 +118,7 @@ def train(agent, optim, states, actions, returns, action_dim):
 
     loss = loss_policy + .5 * loss_critic + .05 * loss_entropy
     loss.backward()
-
-    torch.nn.utils.clip_grad_norm_(agent.parameters(), 20)
+    torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
     optim.step()
 
 
