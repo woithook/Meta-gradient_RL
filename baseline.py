@@ -1,6 +1,7 @@
 import gym
 import numpy as np
 import random
+import time
 import torch
 from torch.distributions import Categorical
 import torch.nn.functional as F
@@ -9,10 +10,10 @@ from models import ActorCritic
 
 import matplotlib.pyplot as plt
 
-ITERATION = 500
+ITERATION_NUMS = 500
 SAMPLE_NUMS = 100
 LR = 0.01
-CLIP_GRAD_NORM = 0.5
+CLIP_GRAD_NORM = 40
 
 
 def run(random_seed):
@@ -31,15 +32,16 @@ def run(random_seed):
     agent = ActorCritic(STATE_DIM, ACTION_DIM)
     optim = torch.optim.Adam(agent.parameters(), lr=LR)
 
-    iterations = []
-    test_results = []
-
     gamma = 0.99
 
     init_state = task.reset()
 
-    for i in range(ITERATION):
+    iterations = []
+    test_results = []
+
+    for i in range(ITERATION_NUMS):
         states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state, gamma)
+        init_state = current_state
         train(agent, optim, states, actions, returns, ACTION_DIM)
 
         # testing
@@ -48,8 +50,6 @@ def run(random_seed):
             print("iteration:", i + 1, "test result:", result / 10.0)
             iterations.append(i + 1)
             test_results.append(result / 10)
-            if test_results[-1] > task.spec.reward_threshold:
-                break
 
     return test_results
 
@@ -107,16 +107,15 @@ def train(agent, optim, states, actions, returns, action_dim):
     log_probs_act = log_probs.gather(1, actions).view(-1)
 
     q = returns.detach()
-    # q = (q - q.mean()) / (q.std() + 1e-8)
+    q = (q - q.mean()) / (q.std(unbiased=False) + 1e-12)
     a = q - v
-    # a = (a - a.mean()) / (a.std() + 1e-8)
+    a = (a - a.mean()) / (a.std(unbiased=False) + 1e-12)
 
-    criterion = torch.nn.MSELoss()
     loss_policy = - (a.detach() * log_probs_act).sum()
-    loss_critic = criterion(v, q)
+    loss_critic = a.pow(2.).sum()
     loss_entropy = (log_probs * probs).sum()
 
-    loss = loss_policy + .5 * loss_critic + .05 * loss_entropy
+    loss = loss_policy + .5 * loss_critic + .01 * loss_entropy
     loss.backward()
     torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
     optim.step()
@@ -142,5 +141,11 @@ def test(gym_name, agent):
 
 
 if __name__ == '__main__':
+    date = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
+    total_test_results = []
     for random_seed in range(30):
         test_results = run(random_seed)
+        total_test_results.append(test_results)
+
+    dir = 'learning_results' + date + '.npy'
+    np.save(dir, total_test_results)
