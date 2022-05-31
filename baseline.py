@@ -84,7 +84,7 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
         vs.append(v_t_1.detach().numpy())
         state = next_state
         if done:
-            task.reset()
+            state = task.reset()
             break
 
     return states, actions, calculate_returns(rewards, vs, gamma), state
