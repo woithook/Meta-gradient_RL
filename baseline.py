@@ -1,6 +1,11 @@
+"""
+A2C baseline
+Training with V-trace returns
+"""
 import gym
 import numpy as np
 import random
+import time
 import torch
 from torch.distributions import Categorical
 import torch.nn.functional as F
@@ -9,10 +14,11 @@ from models import ActorCritic
 
 import matplotlib.pyplot as plt
 
-ITERATION = 500
+ITERATION_NUMS = 500
 SAMPLE_NUMS = 100
 LR = 0.01
-CLIP_GRAD_NORM = 0.5
+LAMBDA = 0.99
+CLIP_GRAD_NORM = 40
 
 
 def run(random_seed):
@@ -30,17 +36,19 @@ def run(random_seed):
 
     agent = ActorCritic(STATE_DIM, ACTION_DIM)
     optim = torch.optim.Adam(agent.parameters(), lr=LR)
-
-    iterations = []
-    test_results = []
+    scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=1.0, total_iters=ITERATION_NUMS)
 
     gamma = 0.99
 
     init_state = task.reset()
 
-    for i in range(ITERATION):
+    iterations = []
+    test_results = []
+
+    for i in range(ITERATION_NUMS):
         states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state, gamma)
-        train(agent, optim, states, actions, returns, ACTION_DIM)
+        init_state = current_state
+        train(agent, optim, scheduler, states, actions, returns, ACTION_DIM)
 
         # testing
         if (i + 1) % 10 == 0:
@@ -48,18 +56,16 @@ def run(random_seed):
             print("iteration:", i + 1, "test result:", result / 10.0)
             iterations.append(i + 1)
             test_results.append(result / 10)
-            if test_results[-1] > task.spec.reward_threshold:
-                break
+            # if test_results[-1] > task.spec.reward_threshold:
 
     return test_results
 
 
 def roll_out(agent, task, sample_nums, init_state, gamma):
-    is_done = False
     states = []
     actions = []
     rewards = []
-    final_r = 0
+    vs = []
     state = init_state
 
     for i in range(sample_nums):
@@ -72,27 +78,28 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
             actions.append(act)
 
         next_state, reward, done, _ = task.step(act.numpy())
+        _, v_t_1 = agent(torch.Tensor(next_state))
+
         rewards.append(reward)
+        vs.append(v_t_1.detach().numpy())
         state = next_state
         if done:
-            is_done = True
             task.reset()
             break
-    if not is_done:
-        _, final_r = agent(torch.Tensor(state))
 
-    def calculate_returns(rewards, final_r=0, gamma=0.99):
-        returns = []
-        R = final_r
-        for r in rewards[::-1]:
-            R = r + gamma * R
-            returns.insert(0, R)
-        return returns
-
-    return states, actions, calculate_returns(rewards, final_r, gamma), state
+    return states, actions, calculate_returns(rewards, vs, gamma), state
 
 
-def train(agent, optim, states, actions, returns, action_dim):
+def calculate_returns(rewards, vs, gamma):
+    returns = np.zeros_like(rewards)
+    R = 0
+    for t in reversed(range(0, len(rewards))):
+        R = rewards[t] + gamma * (1 - LAMBDA) * vs[t] + gamma * LAMBDA * R
+        returns[t] = R
+    return returns
+
+
+def train(agent, optim, scheduler, states, actions, returns, action_dim):
     agent.zero_grad()
     optim.zero_grad()
     states = torch.Tensor(np.array(states))
@@ -107,19 +114,19 @@ def train(agent, optim, states, actions, returns, action_dim):
     log_probs_act = log_probs.gather(1, actions).view(-1)
 
     q = returns.detach()
-    # q = (q - q.mean()) / (q.std() + 1e-8)
+    q = (q - q.mean()) / (q.std(unbiased=False) + 1e-12)
     a = q - v
-    # a = (a - a.mean()) / (a.std() + 1e-8)
+    a = (a - a.mean()) / (a.std(unbiased=False) + 1e-12)
 
-    criterion = torch.nn.MSELoss()
     loss_policy = - (a.detach() * log_probs_act).sum()
-    loss_critic = criterion(v, q)
+    loss_critic = a.pow(2.).sum()
     loss_entropy = (log_probs * probs).sum()
 
-    loss = loss_policy + .5 * loss_critic + .05 * loss_entropy
+    loss = loss_policy + .5 * loss_critic + .01 * loss_entropy
     loss.backward()
     torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
     optim.step()
+    scheduler.step()
 
 
 def test(gym_name, agent):
@@ -142,5 +149,11 @@ def test(gym_name, agent):
 
 
 if __name__ == '__main__':
+    date = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
+    total_test_results = []
     for random_seed in range(30):
         test_results = run(random_seed)
+        total_test_results.append(test_results)
+
+    dir = 'learning_results' + date + '.npy'
+    np.save(dir, total_test_results)
