@@ -94,7 +94,7 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
         state = next_state
         if done:
             is_done = True
-            task.reset()
+            state = task.reset()
             break
     if not is_done:
         _, final_r = agent(torch.Tensor(state))
