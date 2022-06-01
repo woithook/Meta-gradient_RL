@@ -1,7 +1,7 @@
 """
 To deal with non-stationarity in the value function and policy which caused by the rapid change of gamma,
 we utilise an idea similar to universal value function approximation (UVFA).
-This means that gamma are combined with observation as inputs of the neural network (i.e., gamma as additional inputs).
+This means that gamma are combined with observation as inputs of the neural network (i.e., additional inputs).
 """
 import gym
 import numpy as np
@@ -34,7 +34,7 @@ SAMPLE_NUMS = 100
 LR = 0.01
 LAMBDA = torch.tensor(0.99)
 CLIP_GRAD_NORM = 40
-MU = 0.
+MU = 0.1
 BETA = 0.001
 GAMMA_INIT = 0.99
 GAMMA_FIX = 0.995
