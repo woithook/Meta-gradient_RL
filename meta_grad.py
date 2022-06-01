@@ -11,15 +11,15 @@ from models import ActorCritic
 
 import matplotlib.pyplot as plt
 
-ITERATION_NUMS = 500
-SAMPLE_NUMS = 100
+ITERATION_NUMS = 500  # 500
+SAMPLE_NUMS = 100  # 100
 LR = 0.01
 LAMBDA = torch.tensor(0.99)
-CLIP_GRAD_NORM = 40
+CLIP_GRAD_NORM = 40  # 40
 MU = 0.
 BETA = 0.001
-GAMMA_INIT = 0.99
-GAMMA_FIX = 0.995
+GAMMA_INIT = 0.99  # 0.99
+GAMMA_FIX = 0.995  # 0.995
 
 
 def run(random_seed):
