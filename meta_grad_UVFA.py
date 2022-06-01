@@ -1,13 +1,14 @@
 """
 To deal with non-stationarity in the value function and policy which caused by the rapid change of gamma,
 we utilise an idea similar to universal value function approximation (UVFA).
-This means that gamma are combined with observation as inputs of the neural network.
+This means that gamma are combined with observation as inputs of the neural network (i.e., additional inputs).
 """
 import gym
 import numpy as np
 import random
 from copy import deepcopy
 import argparse
+import time
 import torch
 from torch.distributions import Categorical
 import torch.nn.functional as F
@@ -28,14 +29,15 @@ import matplotlib.pyplot as plt
 # parser.add_argument('--gamma_fix', type=float, default=1.0, help='fixed gamma in meta-objective function')
 
 
-ITERATION_NUM = 500
-SAMPLE_NUM = 100
+ITERATION_NUMS = 500
+SAMPLE_NUMS = 100
 LR = 0.01
-CLIP_GRAD_NORM = 0.5
+LAMBDA = torch.tensor(0.99)
+CLIP_GRAD_NORM = 40
 MU = 0.
-BETA = 0.0001
+BETA = 0.001
 GAMMA_INIT = 0.99
-GAMMA_FIX = 1.
+GAMMA_FIX = 0.995
 
 
 def run(random_seed):
@@ -53,6 +55,7 @@ def run(random_seed):
 
     agent = ActorCritic(STATE_DIM + 1, ACTION_DIM)
     optim = torch.optim.Adam(agent.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=0.0, total_iters=ITERATION_NUMS)
 
     iterations = []
     test_results = []
@@ -63,15 +66,14 @@ def run(random_seed):
     gamma_buffer = []
 
     init_state = task.reset()
-
-    for i in range(ITERATION_NUM):
-        states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUM, init_state, gamma)
+    for i in range(ITERATION_NUMS):
+        states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state, gamma)
         init_state = current_state
-        z = train(agent, optim, states, actions, returns, gamma, ACTION_DIM)
+        z = train(agent, optim, scheduler, states, actions, returns, gamma, ACTION_DIM)
         z_dash = MU * z_dash + z
 
         # Cross-validating trajectory
-        states_dash, actions_dash, returns_dash, current_state = roll_out(agent, task, SAMPLE_NUM, init_state,
+        states_dash, actions_dash, returns_dash, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state,
                                                                           GAMMA_FIX)
         init_state = current_state
         gamma_buffer.append(deepcopy(gamma.detach().numpy()))
@@ -80,24 +82,23 @@ def run(random_seed):
         # testing
         if (i + 1) % 10 == 0:
             result = test(gym_name, agent, gamma)
-            print("iteration:", i + 1, "test result:", result / 10.0, "gamma:", gamma.detach().numpy())
+            print("iteration:", i + 1, "test result:", result / 10.0, "gamma:", gamma.data)
             iterations.append(i + 1)
             test_results.append(result / 10)
             # Break when the reward in an epoch is higher than the reward threshold
-            if test_results[-1] > task.spec.reward_threshold:
-                break
+            # if test_results[-1] > task.spec.reward_threshold:
+            #     break
 
     return test_results
 
 
 def roll_out(agent, task, sample_nums, init_state, gamma):
-    is_done = False
     states = []
     actions = []
     rewards = []
-    final_r = 0
+    vs = []
     state = init_state
-    gamma_input = gamma.data.numpy() if torch.is_tensor(gamma) else gamma
+    gamma_input = gamma.detach().numpy() if torch.is_tensor(gamma) else gamma
 
     for i in range(sample_nums):
         state = np.append(state, gamma_input)
@@ -110,29 +111,28 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
             actions.append(act)
 
         next_state, reward, done, _ = task.step(act.numpy())
+        _, v_t_1 = agent(torch.Tensor(np.append(next_state, gamma_input)))
+
         rewards.append(reward)
+        vs.append(v_t_1.detach().numpy())
         state = next_state
         if done:
-            is_done = True
-            task.reset()
+            state = task.reset()  # fatal bug happened
             break
-    if not is_done:
-        final_state = np.append(state, gamma_input)
-        _, final_r = agent(torch.Tensor(final_state))
-        final_r = final_r.detach().numpy()
 
-    def calculate_returns_with_grad(rewards, final_r, gamma):
-        returns = torch.zeros_like(torch.tensor(rewards))
-        R = torch.reshape(torch.tensor(final_r), (1, 1))
-        for t in reversed(range(0, len(rewards))):
-            R = R * gamma + torch.tensor(rewards[t])
-            returns[t] = R
-        return returns
-
-    return states, actions, calculate_returns_with_grad(rewards, final_r, gamma), state
+    return states, actions, calculate_returns_with_grad(rewards, vs, gamma), state
 
 
-def train(agent, optim, states, actions, returns, gamma, action_dim):
+def calculate_returns_with_grad(rewards, vs, gamma):
+    returns = torch.zeros_like(torch.tensor(rewards))
+    R = torch.reshape(torch.tensor(0), (1, 1))
+    for t in reversed(range(0, len(rewards))):
+        R = torch.tensor(rewards[t]) + gamma * (1 - LAMBDA) * torch.tensor(vs[t]) + gamma * LAMBDA * R
+        returns[t] = R
+    return returns
+
+
+def train(agent, optim, scheduler, states, actions, returns, gamma, action_dim):
     def compute_z(agent_, log_probs_act_, v_, returns_, gamma_, lr, b):
         lr = torch.tensor(lr)
         b = torch.tensor(b)
@@ -162,8 +162,6 @@ def train(agent, optim, states, actions, returns, gamma, action_dim):
 
         return z
 
-    agent.zero_grad()
-    optim.zero_grad()
     states = torch.Tensor(np.array(states))
     actions = torch.tensor(actions, dtype=torch.int64).view(-1, 1)
 
@@ -179,21 +177,22 @@ def train(agent, optim, states, actions, returns, gamma, action_dim):
     a = q - v
     a = (a - a.mean()) / (a.std(unbiased=False) + 1e-12)
 
-    loss_policy = - (a.detach() * log_probs_act).sum()
-    loss_critic = a.pow(2.).mean()
-    loss_entropy = (log_probs * probs).sum()
+    loss_policy = - (a.detach() * log_probs_act).mean()
+    # loss_critic = a.pow(2.).sum()
+    loss_critic = F.mse_loss(q, v, reduction='mean')
+    loss_entropy = - (log_probs * probs).mean()
 
-    loss = loss_policy + .5 * loss_critic + .01 * loss_entropy
+    loss = loss_policy + .5 * loss_critic - .001 * loss_entropy
+    optim.zero_grad()
     loss.backward(retain_graph=True)
     torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
 
     z = compute_z(agent, log_probs_act, v, returns, gamma, LR, .5)
 
     optim.step()
-    agent.zero_grad()
-    optim.zero_grad()
+    scheduler.step()
 
-    return z.detach()
+    return z.clone().detach().requires_grad_(True)
 
 
 def meta_grad(agent, states_dash, actions_dash, returns_dash, gamma, z_dash, action_dim):
@@ -209,8 +208,8 @@ def meta_grad(agent, states_dash, actions_dash, returns_dash, gamma, z_dash, act
 
     # Compute Equation(14)
     q = returns_dash
-    a = q - v
-    pi = a.detach() * log_probs_act
+    adv = q - v
+    pi = adv.detach() * log_probs_act
     # J1: d(log_probs_act_dash) / d(theta_dash)
     J1 = torch.autograd.grad(pi.mean(), agent.parameters(), allow_unused=True)
     J1 = [torch.zeros_like(params.data) if item is None else item
@@ -218,8 +217,8 @@ def meta_grad(agent, states_dash, actions_dash, returns_dash, gamma, z_dash, act
     J1 = [item.view(-1) for item in J1]
     J1 = torch.cat(J1)
 
-    n_delta = BETA * torch.dot(J1, z_dash)
-    gamma.data -= n_delta
+    n_delta = - BETA * torch.dot(J1, z_dash)
+    gamma.data += n_delta
 
     # Limit gamma into [0, 1]
     if gamma.data > torch.tensor(1.):
@@ -233,7 +232,7 @@ def meta_grad(agent, states_dash, actions_dash, returns_dash, gamma, z_dash, act
 
 
 def test(gym_name, agent, gamma):
-    gamma_input = gamma.data.numpy() if torch.is_tensor(gamma) else gamma
+    gamma_input = gamma.detach().numpy() if torch.is_tensor(gamma) else gamma
 
     result = 0
     test_task = gym.make(gym_name)
@@ -255,5 +254,11 @@ def test(gym_name, agent, gamma):
 
 
 if __name__ == '__main__':
+    date = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
+    total_test_results = []
     for random_seed in range(30):
         test_results = run(random_seed)
+        total_test_results.append(test_results)
+
+    dir = 'learning_results' + date + '.npy'
+    np.save(dir, total_test_results)
