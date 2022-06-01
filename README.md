@@ -6,6 +6,7 @@ _Xu, Zhongwen, Hado P. van Hasselt, and David Silver. "Meta-gradient reinforceme
 In the very beginning, we start with A2C under CartPole-v1 environment and examine the property of Meta-gradient Learning(MGL) on the discount factor γ.
 
 ## Requirements
-* pytorch
-* openai gym
+* Pytorch
+* OpenAI Gym
 
+p.s.: For now all the scripts are CPU versions.
