@@ -1,6 +1,6 @@
 """
 A2C baseline
-Training with V-trace return
+Training with lamda-trace return
 """
 import gym
 import numpy as np
