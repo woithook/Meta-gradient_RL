@@ -2,6 +2,7 @@ import gym
 import numpy as np
 import random
 from copy import deepcopy
+import time
 import torch
 from torch.distributions import Categorical
 import torch.nn.functional as F
@@ -10,14 +11,15 @@ from models import ActorCritic
 
 import matplotlib.pyplot as plt
 
-ITERATION = 500
+ITERATION_NUMS = 500
 SAMPLE_NUMS = 100
-LR = 0.006
-CLIP_GRAD_NORM = 0.5
+LR = 0.01
+LAMBDA = torch.tensor(0.99)
+CLIP_GRAD_NORM = 40
 MU = 0.
-BETA = 0.0001
+BETA = 0.001
 GAMMA_INIT = 0.99
-GAMMA_FIX = 1.
+GAMMA_FIX = 0.995
 
 
 def run(random_seed):
@@ -35,6 +37,7 @@ def run(random_seed):
 
     agent = ActorCritic(STATE_DIM, ACTION_DIM)
     optim = torch.optim.Adam(agent.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=0.0, total_iters=ITERATION_NUMS)
 
     iterations = []
     test_results = []
@@ -45,11 +48,10 @@ def run(random_seed):
     gamma_buffer = []
 
     init_state = task.reset()
-
-    for i in range(ITERATION):
+    for i in range(ITERATION_NUMS):
         states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state, gamma)
         init_state = current_state
-        z = train(agent, optim, states, actions, returns, gamma, ACTION_DIM)
+        z = train(agent, optim, scheduler, states, actions, returns, gamma, ACTION_DIM)
         z_dash = MU * z_dash + z
 
         # Cross-validating trajectory
@@ -65,19 +67,15 @@ def run(random_seed):
             print("iteration:", i + 1, "test result:", result / 10.0, "gamma:", gamma.data)
             iterations.append(i + 1)
             test_results.append(result / 10)
-            # Break when the reward in an epoch is higher than the reward threshold
-            if test_results[-1] > task.spec.reward_threshold:
-                break
 
     return test_results
 
 
 def roll_out(agent, task, sample_nums, init_state, gamma):
-    is_done = False
     states = []
     actions = []
     rewards = []
-    final_r = 0
+    vs = []
     state = init_state
 
     for i in range(sample_nums):
@@ -90,28 +88,28 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
             actions.append(act)
 
         next_state, reward, done, _ = task.step(act.numpy())
+        _, v_t_1 = agent(torch.Tensor(next_state))
+
         rewards.append(reward)
+        vs.append(v_t_1.detach().numpy())
         state = next_state
         if done:
-            is_done = True
-            state = task.reset()
+            state = task.reset()  # fatal bug happened
             break
-    if not is_done:
-        _, final_r = agent(torch.Tensor(state))
-        final_r = final_r.detach().numpy()
 
-    def calculate_returns_with_grad(rewards, final_r, gamma):
-        returns = torch.zeros_like(torch.tensor(rewards))
-        R = torch.reshape(torch.tensor(final_r), (1, 1))
-        for t in reversed(range(0, len(rewards))):
-            R = R * gamma + torch.tensor(rewards[t])
-            returns[t] = R
-        return returns
-
-    return states, actions, calculate_returns_with_grad(rewards, final_r, gamma), state
+    return states, actions, calculate_returns_with_grad(rewards, vs, gamma), state
 
 
-def train(agent, optim, states, actions, returns, gamma, action_dim):
+def calculate_returns_with_grad(rewards, vs, gamma):
+    returns = torch.zeros_like(torch.tensor(rewards))
+    R = torch.reshape(torch.tensor(0), (1, 1))
+    for t in reversed(range(0, len(rewards))):
+        R = torch.tensor(rewards[t]) + gamma * (1 - LAMBDA) * torch.tensor(vs[t]) + gamma * LAMBDA * R
+        returns[t] = R
+    return returns
+
+
+def train(agent, optim, scheduler, states, actions, returns, gamma, action_dim):
     def compute_z(agent_, log_probs_act_, v_, returns_, gamma_, lr, b):
         lr = torch.tensor(lr)
         b = torch.tensor(b)
@@ -141,8 +139,6 @@ def train(agent, optim, states, actions, returns, gamma, action_dim):
 
         return z
 
-    agent.zero_grad()
-    optim.zero_grad()
     states = torch.Tensor(np.array(states))
     actions = torch.tensor(actions, dtype=torch.int64).view(-1, 1)
 
@@ -154,26 +150,24 @@ def train(agent, optim, states, actions, returns, gamma, action_dim):
     log_probs_act = log_probs.gather(1, actions).view(-1)
 
     q = returns.detach()
-    # TODO: trouble shooting of nan emerging while training with normalized q(or a).
-    # q = (q - q.mean()) / (q.std() + 1e-8)
-    adv = q - v
-    # a = (a - a.mean()) / (a.std() + 1e-8)
+    q = (q - q.mean()) / (q.std(unbiased=False) + 1e-12)
+    a = q - v
+    a = (a - a.mean()) / (a.std(unbiased=False) + 1e-12)
 
-    criterion = torch.nn.MSELoss()
-    loss_policy = - (adv.detach() * log_probs_act).sum()
-    loss_critic = criterion(v, q)
+    loss_policy = - (a.detach() * log_probs_act).mean()
     # loss_critic = a.pow(2.).sum()
-    loss_entropy = (log_probs * probs).sum()
-    loss = loss_policy + .5 * loss_critic + .05 * loss_entropy
+    loss_critic = F.mse_loss(q, v, reduction='mean')
+    loss_entropy = - (log_probs * probs).mean()
+
+    loss = loss_policy + .5 * loss_critic - .001 * loss_entropy
+    optim.zero_grad()
     loss.backward(retain_graph=True)
     torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
 
     z = compute_z(agent, log_probs_act, v, returns, gamma, LR, .5)
 
     optim.step()
-    # Clean grad after computing z
-    agent.zero_grad()
-    optim.zero_grad()
+    scheduler.step()
 
     return z.clone().detach().requires_grad_(True)
 
@@ -234,5 +228,11 @@ def test(gym_name, agent):
 
 
 if __name__ == '__main__':
+    date = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
+    total_test_results = []
     for random_seed in range(30):
         test_results = run(random_seed)
+        total_test_results.append(test_results)
+
+    dir = 'learning_results' + date + '.npy'
+    np.save(dir, total_test_results)
