@@ -1,6 +1,6 @@
 """
 A2C baseline
-Training with V-trace returns
+Training with V-trace return
 """
 import gym
 import numpy as np
@@ -36,15 +36,14 @@ def run(random_seed):
 
     agent = ActorCritic(STATE_DIM, ACTION_DIM)
     optim = torch.optim.Adam(agent.parameters(), lr=LR)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=1.0, total_iters=ITERATION_NUMS)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=0.0, total_iters=ITERATION_NUMS)
 
     gamma = 0.99
-
-    init_state = task.reset()
 
     iterations = []
     test_results = []
 
+    init_state = task.reset()
     for i in range(ITERATION_NUMS):
         states, actions, returns, current_state = roll_out(agent, task, SAMPLE_NUMS, init_state, gamma)
         init_state = current_state
@@ -56,7 +55,6 @@ def run(random_seed):
             print("iteration:", i + 1, "test result:", result / 10.0)
             iterations.append(i + 1)
             test_results.append(result / 10)
-            # if test_results[-1] > task.spec.reward_threshold:
 
     return test_results
 
@@ -84,7 +82,7 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
         vs.append(v_t_1.detach().numpy())
         state = next_state
         if done:
-            state = task.reset()
+            state = task.reset()  # fatal bug happened
             break
 
     return states, actions, calculate_returns(rewards, vs, gamma), state
@@ -100,8 +98,6 @@ def calculate_returns(rewards, vs, gamma):
 
 
 def train(agent, optim, scheduler, states, actions, returns, action_dim):
-    agent.zero_grad()
-    optim.zero_grad()
     states = torch.Tensor(np.array(states))
     actions = torch.tensor(actions, dtype=torch.int64).view(-1, 1)
     returns = torch.Tensor(returns)
@@ -118,11 +114,13 @@ def train(agent, optim, scheduler, states, actions, returns, action_dim):
     a = q - v
     a = (a - a.mean()) / (a.std(unbiased=False) + 1e-12)
 
-    loss_policy = - (a.detach() * log_probs_act).sum()
-    loss_critic = a.pow(2.).sum()
-    loss_entropy = (log_probs * probs).sum()
+    loss_policy = - (a.detach() * log_probs_act).mean()
+    # loss_critic = a.pow(2.).sum()
+    loss_critic = F.mse_loss(q, v, reduction='mean')
+    loss_entropy = - (log_probs * probs).mean()
 
-    loss = loss_policy + .5 * loss_critic + .01 * loss_entropy
+    loss = loss_policy + .5 * loss_critic - .001 * loss_entropy
+    optim.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(agent.parameters(), CLIP_GRAD_NORM)
     optim.step()
