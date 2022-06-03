@@ -1,8 +1,6 @@
 """
-A2C baseline
-Training with GAE(Generalized Advantage Estimator) for both the actor and the critic.
-delta_t =  r_t - V_t + gamma * V_t+1
-A_t = sum_0~l((gamma * lambda)^l * delta_t+l)
+A2C + GAE baseline
+Ensure every trajectory has the same length.
 """
 import gym
 import numpy as np
@@ -67,10 +65,14 @@ def run(random_seed):
 def roll_out(agent, task, sample_nums, init_state, gamma):
     states = []
     actions = []
+    advs = []
+    v_targets = []
+
     rewards = []
     v_t_s = []
     v_t1_s = []
     dones = []
+
     state = init_state
 
     for i in range(sample_nums):
@@ -92,13 +94,27 @@ def roll_out(agent, task, sample_nums, init_state, gamma):
         state = next_state
         if done:
             state = task.reset()
-            break
-    advs, v_targets = gae(rewards, v_t_s, v_t1_s, dones, gamma, LAMBDA)
+            adv, v_target = gae_calculater(rewards, v_t_s, v_t1_s, dones, gamma, LAMBDA)
+
+            advs.append(adv)
+            v_targets.append(v_target)
+            rewards = []
+            v_t_s = []
+            v_t1_s = []
+            dones = []
+    adv, v_target = gae_calculater(rewards, v_t_s, v_t1_s, dones, gamma, LAMBDA)
+    advs.append(adv)
+    v_targets.append(v_target)
+    advs = [item for sublist in advs for item in sublist]
+    v_targets = [item for sublist in v_targets for item in sublist]
 
     return states, actions, advs, v_targets, state
 
 
-def gae(rewards, v_t_s, v_t1_s, dones, gamma, lambda_):
+def gae_calculater(rewards, v_t_s, v_t1_s, dones, gamma, lambda_):
+    """
+    Calculate advantages and target v-values
+    """
     batch_size = len(rewards)
     advs = np.zeros(batch_size + 1)
     for t in reversed(range(0, batch_size)):
@@ -109,23 +125,12 @@ def gae(rewards, v_t_s, v_t1_s, dones, gamma, lambda_):
     return advs[:batch_size], value_target
 
 
-def calculate_qs(rewards, final_v, gamma):
-    returns = np.zeros_like(rewards)
-    R = final_v
-    for t in reversed(range(0, len(rewards))):
-        R = R * gamma + rewards[t]
-        returns[t] = R
-    return returns
-
-
 def train(agent, optim, scheduler, states, actions, advs, v_targets, action_dim):
     states = torch.Tensor(np.array(states))
     actions = torch.tensor(actions, dtype=torch.int64).view(-1, 1)
 
     v_targets = torch.Tensor(v_targets).detach()
-    # v_targets = (v_targets - advs.mean()) / (v_targets.std(unbiased=False) + 1e-12)
     advs = torch.Tensor(advs).detach()
-    # advs = (advs - advs.mean()) / (advs.std(unbiased=False) + 1e-12)
 
     logits, v = agent(states)
     logits = logits.view(-1, action_dim)
