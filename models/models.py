@@ -30,6 +30,40 @@ class ActorCritic(nn.Module):
         vi = self.critic(x)
 
         return pi, vi
+    
+
+class ConvActorCritic(nn.Module):
+    def __init__(self, l1, l2, l_obs, n_action):
+        super(ConvNet, self).__init__()
+        self.l1 = l1
+        self.l2 = l2
+        self.l_obs = l_obs
+        self.n_action = n_action
+        self.conv = nn.Sequential(
+            nn.Conv2d(l_obs, 32, 5, stride=1, padding=2),
+            nn.MaxPool2d(2, 2),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, 5, stride=1, padding=1),
+            nn.MaxPool2d(2, 2),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=1, padding=1),
+            nn.MaxPool2d(2, 2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1, padding=1),
+            nn.MaxPool2d(2, 2),
+            nn.ReLU(),
+        )
+        self.fc = nn.Sequential(nn.Linear(1024, 512),
+                                nn.ReLU())
+        self.act_net = nn.Linear(512, self.n_action)
+        self.cri_net = nn.Linear(512, 1)
+
+    def forward(self, inputs):
+        x = self.conv(inputs)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return self.act_net(x), self.cri_net(x)
 
 
 def weight_init(m):
